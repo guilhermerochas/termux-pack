@@ -80,6 +80,10 @@ fn validate_manifest(manifest: &ManifestFile) -> Result<Value, Box<dyn std::erro
 
 #[cfg(not(target_os = "windows"))]
 fn main() -> std::io::Result<()> {
+    use std::path::PathBuf;
+
+    use tempfile::tempdir;
+
     // Generates a DEB file from a JSON manifest.
     let mut install_prefix: String = String::from("/data/data/com.termux/files/usr/");
 
@@ -116,10 +120,12 @@ fn main() -> std::io::Result<()> {
         .value_of("manifest")
         .expect("No MANIFEST file was provided");
 
-    if !Path::new(manifest_path).exists() {
+    let manifest_file_path = if !Path::new(manifest_path).exists() {
         eprintln!("The path to the manifest file was not found");
         std::process::exit(1);
-    }
+    } else {
+        Path::new(manifest_path).parent().unwrap()
+    };
 
     let manifest_file: String = std::fs::read_to_string(manifest_path)
         .expect("Not ableto read the Manifest File")
@@ -132,6 +138,7 @@ fn main() -> std::io::Result<()> {
     let package_name = manifest_json["name"].as_str().unwrap();
     let package_version = manifest_json["version"].as_str().unwrap();
     //let package_files = &manifest_json["files"];
+
     let output_debfile_name = format!(
         "{}_{}_{}.deb",
         &package_name.replace("\"", ""),
@@ -139,12 +146,15 @@ fn main() -> std::io::Result<()> {
         &manifest_json["arch"].as_str().unwrap().replace("\"", "")
     );
 
-    let package_temp_directory = TempDir::new_in(".")?
-        .path()
-        .to_owned()
-        .join("debian-binary");
-    let mut tmp_file = std::fs::File::create(package_temp_directory)?;
-    writeln!(tmp_file, "2.0\n")?;
+    let dir = tempdir()?;
+    let file_path = dir.path().join("debian-binary");
+    let mut file = std::fs::File::create(file_path)?;
+    writeln!(file, "2.0\n")?;
+
+    let debscripts = vec!["preinst", "postinst", "prerm", "postrm"]
+        .iter()
+        .map(|debscript| manifest_file_path.join(debscript))
+        .collect::<Vec<PathBuf>>();
 
     println!("Building {}", output_debfile_name);
 
