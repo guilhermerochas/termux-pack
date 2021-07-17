@@ -1,11 +1,11 @@
 use core::str;
 use manifest::ManifestFile;
-use serde_json::Value;
 use std::io::Write;
-use std::path::Path;
-use tempfile::TempDir;
+use std::path::{Path, PathBuf};
 
 mod manifest;
+mod tar;
+mod utils;
 
 static DESCRIPTION: &str = r#"Create a Termux package from a JSON manifest file. Example of manifest:
 
@@ -41,50 +41,10 @@ The resulting .deb file can be installed by Termux users with:
   apt install ./package-file.deb
 or by hosting it in an apt repository using the termux-apt-repo tool."#;
 
-fn validate_manifest(manifest: &ManifestFile) -> Result<Value, Box<dyn std::error::Error>> {
-    // Validate that the package manifest makes sense.
-
-    let json: Value = serde_json::from_str(
-        serde_json::to_string(&manifest)
-            .expect(
-                "Not able to convert an Manifest Object to String while validating the manifest",
-            )
-            .as_str(),
-    )
-    .expect("Not able to convert an string to JSON while validating the manifest");
-
-    for property in ["name", "version", "files"].iter() {
-        match json.get(property) {
-            Some(value) => {
-                if value.is_null() {
-                    eprintln!("Missing mandatory {} property", property);
-                    std::process::exit(1);
-                }
-            }
-            None => unreachable!(),
-        }
-    }
-
-    if !["all", "arm", "i686", "aarch64", "x86_64"]
-        .iter()
-        .any(|value| value.to_owned() == json["arch"].as_str().unwrap().replace("\"", ""))
-    {
-        println!("{}", &json["arch"].as_str().expect("nothing"));
-
-        eprintln!(r#"'Invalid "arch" - must be one of all/arm/i686/aarch64/x86_64'"#);
-        std::process::exit(1);
-    }
-
-    return Ok(json);
-}
-
 #[cfg(not(target_os = "windows"))]
 fn main() -> std::io::Result<()> {
-    use std::path::PathBuf;
-
-    use tempfile::tempdir;
-
     // Generates a DEB file from a JSON manifest.
+
     let mut install_prefix: String = String::from("/data/data/com.termux/files/usr/");
 
     let argparser = clap::App::new("termux-pack")
@@ -131,32 +91,40 @@ fn main() -> std::io::Result<()> {
         .expect("Not ableto read the Manifest File")
         .to_owned();
 
-    let manifest: ManifestFile = ManifestFile::from_json(&manifest_file.as_str());
+    let manifest: ManifestFile = match ManifestFile::from_json(&manifest_file.as_str()) {
+        Ok(man) => man,
+        Err(err) => {
+            eprintln!("{}", err);
+            std::process::exit(1);
+        }
+    };
 
-    let manifest_json = validate_manifest(&manifest).expect("Not able to validate the manifest");
+    utils::validate_manifest(&manifest);
 
-    let package_name = manifest_json["name"].as_str().unwrap();
-    let package_version = manifest_json["version"].as_str().unwrap();
-    //let package_files = &manifest_json["files"];
+    let package_name = &manifest.name;
+    let package_version = &manifest.version;
+    let package_files = &manifest.files;
 
     let output_debfile_name = format!(
         "{}_{}_{}.deb",
-        &package_name.replace("\"", ""),
-        &package_version.replace("\"", ""),
-        &manifest_json["arch"].as_str().unwrap().replace("\"", "")
+        &package_name, &package_version, &manifest.arch
     );
 
-    let dir = tempdir()?;
-    let file_path = dir.path().join("debian-binary");
+    println!("{}", output_debfile_name);
+
+    let tar_path = tempfile::tempdir()?;
+    let file_path = tar_path.path().join("debian-binary");
     let mut file = std::fs::File::create(file_path)?;
     writeln!(file, "2.0\n")?;
 
     let debscripts = vec!["preinst", "postinst", "prerm", "postrm"]
         .iter()
         .map(|debscript| manifest_file_path.join(debscript))
-        .collect::<Vec<PathBuf>>();
+        .collect::<Vec<std::path::PathBuf>>();
 
     println!("Building {}", output_debfile_name);
+
+    tar::write_control_tar(&tar_path, &manifest, &debscripts)?;
 
     Ok(())
 }
